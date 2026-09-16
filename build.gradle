@@ -1,0 +1,12 @@
+// Top-level build file. Repositories are centralized in settings.gradle
+// (dependencyResolutionManagement). The Xposed API repo (api.xposed.info)
+// is declared there so the :app module can resolve de.robv.android.xposed:api.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+    }
+}

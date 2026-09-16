@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.openew.monster.ttzzbx32.hook"
+    android:installLocation="auto">
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@android:drawable/ic_menu_manage">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+
+        <meta-data
+            android:name="xposeddescription"
+            android:value="运行时激活 com.openew.monster.ttzzbx32 内置 DebugCheat 键盘作弊（无需改包/重签名）。" />
+
+        <!-- LSPosed API level 93 -->
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+
+        <!-- LSPosed scope: which apps this module hooks -->
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+    </application>
+</manifest>
