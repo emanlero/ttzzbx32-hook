@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
-import de.robv.android.xposed.IXposedMod;
+import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
@@ -47,7 +47,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * The payload is idempotent (window.__ttzz / __ttzzUi flags + JS-side retry loop),
  * so duplicate or repeated triggers are harmless.
  */
-public class MainHook implements IXposedMod {
+public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TARGET_PACKAGE = "com.openew.monster.ttzzbx32";
     private static final String BRIDGE_CLASS = "org.cocos2dx.lib.Cocos2dxJavascriptJavaBridge";
