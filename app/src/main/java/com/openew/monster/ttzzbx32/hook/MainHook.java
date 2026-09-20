@@ -209,6 +209,9 @@ public class MainHook implements IXposedHookLoadPackage {
                     "onSurfaceCreated", GL10.class, EGLConfig.class, new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) {
+                            // a fresh surface may mean a freshly (re)initialized engine:
+                            // allow re-injection even if we already injected before.
+                            PAYLOAD_SENT.set(false);
                             evalPayload("onSurfaceCreated");
                         }
                     });
@@ -249,6 +252,12 @@ public class MainHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             XposedBridge.log("[TTZZBX32] activity hook FAILED: " + t);
         }
+
+        // Periodic re-injection watchdog. The Cocos JS engine can be cleaned up and
+        // re-initialized at runtime (ScriptEngine::cleanup), which wipes window.__ttzz
+        // and our UI node. The payload is idempotent (window.__ttzz guard), so re-injecting
+        // on a live engine is a safe no-op, and re-injecting after a reset rebuilds the UI.
+        scheduleWatchdog();
     }
 
     /** Resolve Cocos2dxJavascriptJavaBridge.evalString via the app's classloader. */
@@ -295,6 +304,27 @@ public class MainHook implements IXposedHookLoadPackage {
             // Last resort: direct eval (harmless if the VM is not ready).
             evalPayload("direct-fallback");
         }
+    }
+
+    /** Periodic re-injection watchdog (see scheduleWatchdog()). */
+    private static volatile boolean watchdogStarted = false;
+    private static void scheduleWatchdog() {
+        if (watchdogStarted) {
+            return;
+        }
+        watchdogStarted = true;
+        final Handler h = new Handler(Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // allow re-injection into a (possibly re-initialized) engine; the payload
+                // is idempotent so this is a no-op while the engine is alive, and rebuilds
+                // the UI after a ScriptEngine::cleanup wiped window.__ttzz.
+                PAYLOAD_SENT.set(false);
+                injectViaActivity();
+                h.postDelayed(this, 2000);
+            }
+        }, 2000);
     }
 
     /**
