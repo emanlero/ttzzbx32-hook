@@ -37,6 +37,13 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *      - menu buttons call window.DebugCheat.handleKeyDown(<official keycode>) or
  *        toggle BattleTestManager.inst.isWallSuper directly;
  *      - the "隐藏" item collapses the menu back to the dot.
+ *
+ * 3. Hero-boost toggle (纯客户端本地修改, 不影响登录/结算上报):
+ *      - "英雄强化 开/关" 遍历场上所有法师实体, 把攻击范围 atkRange 用 getter 锁成极大值(全屏),
+ *        攻速(entityTimeScaleAdd)用 getter 锁成 100 倍, 技能冷却(skillGhost.cdSkills[].isReady)每帧置 true = 0 CD.
+ *      - 用 getter-only 覆盖, 因为 AtkSpeAttribute.refreshData() 每帧会重置 entityTimeScaleAdd,
+ *        AtkRangeAttribute.refreshData() 每帧会重置 atkRange; 赋值变 no-op, 读取恒返回强化值.
+ *      - 只对己方英雄生效 (mageEntities), 不改变 channel(登录/选服逻辑不受影响).
  *    The UI root is a persistent node; additionally buildUI() re-runs on every scene
  *    launch (via a loadScene hook + EVENT_AFTER_SCENE_LAUNCH) and is guarded by a node
  *    validity check, so the dot always comes back even if the persist-root was dropped.
@@ -119,6 +126,50 @@ public class MainHook implements IXposedHookLoadPackage {
           + "    else tip('城墙无敌不可用');"
           + "  } catch(e){ tip('城墙无敌失败'); }"
           + "}"
+          + "var HERO_BOOST = false;"
+          + "var BIG_RANGE = null;"
+          + "function boostAllHeroes(){"
+          + "  try {"
+          + "    if (typeof Battle === 'undefined' || !Battle || !Battle.EntityMgr || !Battle.EntityMgr.inst) return;"
+          + "    var battle = null;"
+          + "    try { battle = Battle.EntityMgr.inst.getBattle(BattleIndex.myBattle); } catch(e){ return; }"
+          + "    if (!battle || !battle.mageEntities) return;"
+          + "    for (var i = 0; i < battle.mageEntities.length; i++) {"
+          + "      var e = battle.mageEntities[i];"
+          + "      if (!e) continue;"
+          + "      var oc = null;"
+          + "      try { oc = e.getComponentKeys(Battle.BaseObjectComponent); } catch(e2){ try { oc = e.getComponent(Battle.BaseObjectComponent); } catch(e3){ continue; } }"
+          + "      if (!oc) continue;"
+          + "      if (!BIG_RANGE) { try { BIG_RANGE = new (oc.atkRange.constructor)(1000000); } catch(e4){ BIG_RANGE = null; } }"
+          + "      try {"
+          + "        if (!oc.__ttzzRangeLocked) {"
+          + "          Object.defineProperty(oc, 'atkRange', {configurable:true, get:function(){ return BIG_RANGE; }, set:function(){}});"
+          + "          oc.__ttzzRangeLocked = true;"
+          + "          if (oc.rigidBodyComponent && oc.rigidBodyComponent.changeAttackCollider) oc.rigidBodyComponent.changeAttackCollider();"
+          + "        }"
+          + "      } catch(e5){}"
+          + "      try {"
+          + "        if (!e.__ttzzSpdLocked) {"
+          + "          Object.defineProperty(e, 'entityTimeScaleAdd', {configurable:true, get:function(){ return 100; }, set:function(){}});"
+          + "          e.__ttzzSpdLocked = true;"
+          + "        }"
+          + "      } catch(e6){}"
+          + "      try {"
+          + "        var sc = e.getComponent(Battle.SkillComponent);"
+          + "        if (sc && sc.skillGhost && sc.skillGhost.cdSkills) {"
+          + "          for (var k = 0; k < sc.skillGhost.cdSkills.length; k++) {"
+          + "            var cd = sc.skillGhost.cdSkills[k];"
+          + "            if (cd && cd.isReady !== undefined) cd.isReady = true;"
+          + "            if (cd && cd.attack_range && BIG_RANGE) { try { cd.attack_range = BIG_RANGE; } catch(e7){} }"
+          + "          }"
+          + "        }"
+          + "      } catch(e8){}"
+          + "    }"
+          + "  } catch(e9){}"
+          + "}"
+          + "function heroBoostLoop(){"
+          + "  if (HERO_BOOST) { try { boostAllHeroes(); } catch(e){} setTimeout(heroBoostLoop, 300); }"
+          + "}"
           + "function mkLabel(parent, text, size, color, y){"
           + "  var t = new cc.Node(); var l = t.addComponent(cc.Label);"
           + "  l.string = text; l.fontSize = size; l.lineHeight = size + 4;"
@@ -155,6 +206,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "    ['战斗石+10', function(){ fire(cc.macro.KEY.num8); }],"
           + "    ['掉落宝箱', function(){ fire(cc.macro.KEY.x); }],"
           + "    ['测试工具窗', function(){ fire(cc.macro.KEY.t); }],"
+          + "    ['英雄强化 开/关', function(){ HERO_BOOST = !HERO_BOOST; if (HERO_BOOST){ try { boostAllHeroes(); } catch(e){} heroBoostLoop(); tip('英雄强化:开'); } else tip('英雄强化:关'); }],"
           + "    ['隐藏', function(){ menu.active = false; }]"
           + "  ];"
           + "  var BW = Math.min(560, size.width * 0.8);"
