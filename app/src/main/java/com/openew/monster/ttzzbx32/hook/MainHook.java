@@ -52,6 +52,19 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *    launch (via a loadScene hook + EVENT_AFTER_SCENE_LAUNCH) and is guarded by a node
  *    validity check, so the dot always comes back even if the persist-root was dropped.
  *
+ * 4. Time-mask on the analytics channel (NOT the game-server settlement):
+ *      - The game server (C2S_END_LEVEL / EndLevelArg) has NO time field at all, so the
+ *        clear time cannot be seen there. BUT the analytics tunnel does report it:
+ *        Core.TrackingTagMgr.tag.tagTrackData(game_end, ...) -> Core.thinkingTrack() sends
+ *        a payload containing BOTH `duration` (engine GameWorld.gameTimer, affected by the
+ *        +/- global speed cheat) and `duration_ab` (Date.now() - localStorage
+ *        __xgw_battle_begintime = REAL wall-clock seconds, which no in-game cheat can change).
+ *        A clear finished far too fast (or duration != duration_ab) is the one real anomaly.
+ *      - So "一键胜利" now arms window.__ttzzFakeTime and installTimeMask() wraps
+ *        Core.thinkingTrack, rewriting BOTH duration and duration_ab of that one game_end
+ *        event to a random 540..710 s (9-12 min, a plausible clear time), then disarms.
+ *        Normal (non-cheat) play is untouched -- the flag is only set by the button.
+ *
  * IMPORTANT classloader note: org.cocos2dx.lib.* classes live in the TARGET app's
  * PathClassLoader, NOT the module's. Class.forName() from module code will NOT find
  * them. We therefore resolve the bridge class through lpparam.classLoader and cache
@@ -202,6 +215,31 @@ public class MainHook implements IXposedHookLoadPackage {
           + "function heroBoostLoop(){"
           + "  if (HERO_BOOST) { try { boostAllHeroes(true); } catch(e){} setTimeout(heroBoostLoop, 300); }"
           + "}"
+          + "function installTimeMask(){"
+          + "  try {"
+          + "    if (typeof Core === 'undefined' || !Core) return false;"
+          + "    if (!Core.thinkingTrack || typeof Core.thinkingTrack !== 'function') return false;"
+          + "    if (Core.__ttzzTimeMask) return true;"
+          + "    var orig = Core.thinkingTrack;"
+          + "    Core.thinkingTrack = function(ev, data){"
+          + "      try {"
+          + "        if (window.__ttzzFakeTime && data) {"
+          + "          var isEnd = false;"
+          + "          try { isEnd = (Core.TagTrackType && ev === Core.TagTrackType.game_end); } catch(e1){}"
+          + "          if (isEnd || data.duration_ab !== undefined) {"
+          + "            var v = 540 + Math.floor(Math.random() * 171);"
+          + "            data.duration = v;"
+          + "            data.duration_ab = v;"
+          + "            window.__ttzzFakeTime = false;"
+          + "          }"
+          + "        }"
+          + "      } catch(e2){}"
+          + "      return orig.apply(this, arguments);"
+          + "    };"
+          + "    Core.__ttzzTimeMask = true;"
+          + "    return true;"
+          + "  } catch(e3){ return false; }"
+          + "}"
           + "function mkLabel(parent, text, size, color, y){"
           + "  var t = new cc.Node(); var l = t.addComponent(cc.Label);"
           + "  l.string = text; l.fontSize = size; l.lineHeight = size + 4;"
@@ -229,7 +267,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "  var menu = new cc.Node('ttzz_menu');"
           + "  var mg = menu.addComponent(cc.Graphics);"
           + "  var items = ["
-          + "    ['一键胜利', function(){ fire(cc.macro.KEY.num2); tip('一键胜利'); }],"
+          + "    ['一键胜利', function(){ installTimeMask(); window.__ttzzFakeTime = true; fire(cc.macro.KEY.num2); tip('一键胜利(耗时已随机化)'); }],"
           + "    ['跳末波+英雄x100', function(){ fire(cc.macro.KEY.num3); tip('英雄x100'); }],"
           + "    ['收尾布置', function(){ fire(cc.macro.KEY.b); tip('收尾布置'); }],"
           + "    ['城墙无敌 开/关', function(){ wallToggle(); }],"
@@ -311,6 +349,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "function tick(){"
           + "  tries++;"
           + "  var ok = unlockCheat();"
+          + "  try { installTimeMask(); } catch(e){ }"
           + "  if (ok) window.__ttzzCh = 1;"
           + "  var sceneOk = false;"
           + "  try { sceneOk = (typeof cc !== 'undefined' && cc.director && cc.director.getScene && cc.director.getScene() && cc.view && cc.view.getVisibleSize); } catch(e){}"
