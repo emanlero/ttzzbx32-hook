@@ -33,6 +33,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *
  * 2. Build an in-game floating UI with pure cc.Node/cc.Graphics:
  *      - a small "功能" dot near the top-left, visible once the game scene is up;
+ *        it is DRAGGABLE (touch-move threshold ~6px separates drag from tap), clamped
+ *        inside the visible area, and its position is remembered across scene rebuilds
+ *        via window.__ttzzDotPos (locations are converted with root.convertToNodeSpaceAR
+ *        so scaling does not skew the drag);
  *      - tapping the dot toggles a CENTERED function menu;
  *      - menu buttons call window.DebugCheat.handleKeyDown(<official keycode>) or
  *        toggle BattleTestManager.inst.isWallSuper directly;
@@ -263,8 +267,42 @@ public class MainHook implements IXposedHookLoadPackage {
           + "  dot.setContentSize(72, 72);"
           + "  dot.setAnchorPoint(0.5, 0.5);"
           + "  mkLabel(dot, '功能', 18, cc.color(30,30,30,255), 0);"
-          + "  dot.setPosition(46, size.height - 56);"
-          + "  dot.on(cc.Node.EventType.TOUCH_END, function(){ menu.active = !menu.active; });"
+          + "  var dp = window.__ttzzDotPos;"
+          + "  if (!dp) dp = { x: 46, y: size.height - 56 };"
+          + "  dp.x = Math.max(40, Math.min(size.width - 40, dp.x));"
+          + "  dp.y = Math.max(40, Math.min(size.height - 40, dp.y));"
+          + "  dot.setPosition(dp.x, dp.y);"
+          + "  var st = { lx:0, ly:0, ox:0, oy:0, moved:false };"
+          + "  function nloc(ev){"
+          + "    try {"
+          + "      var l = ev.getLocation();"
+          + "      if (root.convertToNodeSpaceAR) { var r = root.convertToNodeSpaceAR(l); return { x: r.x, y: r.y }; }"
+          + "      return l;"
+          + "    } catch(e){ return { x:0, y:0 }; }"
+          + "  }"
+          + "  function clampTo(nx, ny){"
+          + "    var s2 = 0; try { s2 = cc.view.getVisibleSize(); } catch(e){}"
+          + "    if (!s2) s2 = { width: 0, height: 0 };"
+          + "    var mx = Math.max(40, Math.min(s2.width - 40, nx));"
+          + "    var my = Math.max(40, Math.min(s2.height - 40, ny));"
+          + "    return { x: mx, y: my };"
+          + "  }"
+          + "  function keep(){ try { window.__ttzzDotPos = { x: dot.x, y: dot.y }; } catch(e){} }"
+          + "  dot.on(cc.Node.EventType.TOUCH_START, function(ev){"
+          + "    try { var p = nloc(ev); st.lx = p.x; st.ly = p.y; st.ox = dot.x; st.oy = dot.y; st.moved = false; } catch(e){}"
+          + "  });"
+          + "  dot.on(cc.Node.EventType.TOUCH_MOVE, function(ev){"
+          + "    try {"
+          + "      var p = nloc(ev);"
+          + "      var dx = p.x - st.lx, dy = p.y - st.ly;"
+          + "      if (!st.moved && (dx*dx + dy*dy) > 36) st.moved = true;"
+          + "      if (st.moved) { var c = clampTo(st.ox + dx, st.oy + dy); dot.setPosition(c.x, c.y); }"
+          + "    } catch(e){}"
+          + "  });"
+          + "  dot.on(cc.Node.EventType.TOUCH_END, function(){"
+          + "    try { if (st.moved) keep(); else menu.active = !menu.active; } catch(e){}"
+          + "  });"
+          + "  dot.on(cc.Node.EventType.TOUCH_CANCEL, function(){ try { if (st.moved) keep(); } catch(e){} });"
           + "  root.addChild(dot);"
           + "  scene.addChild(root);"
           + "  try { cc.game.addPersistRootNode(root); } catch(e){}"
