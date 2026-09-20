@@ -65,6 +65,15 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *        event to a random 540..710 s (9-12 min, a plausible clear time), then disarms.
  *        Normal (non-cheat) play is untouched -- the flag is only set by the button.
  *
+ * 5. Ad-free / free-sweep toggle (client-side privilege flag, does NOT evade detection):
+ *      - 免费扫荡 gates on Shop.ShopVipMgr.inst.outStatusAdvip (GameLogic.js 31405):
+ *        `if (!outStatusAdvip) -> play an ad; else -> skip ad and call C2S_SPEED_PASS_LEVEL`.
+ *        31441 likewise lifts the "free sweep > 3" limit only when outStatusAdvip is set.
+ *      - So the "免广告/免费扫荡" button sets M._outStatusAdvip = {StatusId:'advip',...} and toggles
+ *        _isUpdateAdvipStatus (MVC.observe target) to refresh UI; OFF restores the original value.
+ *      - This is an in-memory client privilege only (server still grants the sweep via RPC,
+ *        and login re-pushes the real Statuses, which overwrites it on the next relogin).
+ *
  * IMPORTANT classloader note: org.cocos2dx.lib.* classes live in the TARGET app's
  * PathClassLoader, NOT the module's. Class.forName() from module code will NOT find
  * them. We therefore resolve the bridge class through lpparam.classLoader and cache
@@ -240,6 +249,24 @@ public class MainHook implements IXposedHookLoadPackage {
           + "    return true;"
           + "  } catch(e3){ return false; }"
           + "}"
+          + "var ADV_ON = false;"
+          + "var ADV_ORIG = null;"
+          + "function advFreeSweep(on){"
+          + "  try {"
+          + "    var M = null;"
+          + "    try { if (typeof Shop !== 'undefined' && Shop && Shop.ShopVipMgr) M = Shop.ShopVipMgr.inst; } catch(e){}"
+          + "    if (!M) { try { M = eval('Shop').ShopVipMgr.inst; } catch(e){} }"
+          + "    if (!M) return false;"
+          + "    if (on) {"
+          + "      if (!ADV_ON) { ADV_ORIG = M._outStatusAdvip; ADV_ON = true; }"
+          + "      M._outStatusAdvip = { StatusId: 'advip', EndTime: 9999999999, RemainTime: 999999999 };"
+          + "    } else {"
+          + "      if (ADV_ON) { M._outStatusAdvip = ADV_ORIG; ADV_ON = false; }"
+          + "    }"
+          + "    try { M._isUpdateAdvipStatus = !M._isUpdateAdvipStatus; } catch(e){}"
+          + "    return true;"
+          + "  } catch(e2){ return false; }"
+          + "}"
           + "function mkLabel(parent, text, size, color, y){"
           + "  var t = new cc.Node(); var l = t.addComponent(cc.Label);"
           + "  l.string = text; l.fontSize = size; l.lineHeight = size + 4;"
@@ -277,6 +304,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "    ['掉落宝箱', function(){ fire(cc.macro.KEY.x); }],"
           + "    ['测试工具窗', function(){ fire(cc.macro.KEY.t); }],"
           + "    ['英雄强化 开/关', function(){ HERO_BOOST = !HERO_BOOST; if (HERO_BOOST){ try { boostAllHeroes(); } catch(e){} heroBoostLoop(); tip('英雄强化:开'); } else tip('英雄强化:关'); }],"
+          + "    ['免广告/免费扫荡', function(){ var st = !ADV_ON; var r = advFreeSweep(st); tip(r ? ('免广告/免费扫荡:' + (st ? '开' : '关')) : '免广告不可用'); }],"
           + "    ['隐藏', function(){ menu.active = false; }]"
           + "  ];"
           + "  var BW = Math.min(560, size.width * 0.8);"
