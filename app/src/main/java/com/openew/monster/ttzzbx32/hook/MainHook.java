@@ -22,8 +22,14 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  * Everything is done by injecting JS into the game's own JS engine (no APK change,
  * no overlay permission, no keyboard/Bluetooth needed):
  *
- * 1. Unlock the built-in DebugCheat: rewrite the `channel` getter on
- *    Home.GlobalConfig.inst so it always returns "debug".
+ * 1. Unlock the built-in DebugCheat WITHOUT breaking login: the game gates
+ *    DebugCheat.handleKeyDown behind `if ("debug" != Home.GlobalConfig.inst.channel) return`.
+ *    We do NOT overwrite the global channel getter (that would re-route MixLogin to WebLogin
+ *    and point serverlist/appconfig at the "outer"/"debug" env, which is why enabling the
+ *    module used to fail account login). Instead we wrap window.DebugCheat.handleKeyDown so it
+ *    temporarily reports channel="debug" ONLY for the duration of the cheat call, then restores
+ *    the real channel. The global channel stays at its real value (e.g. td_openew_qianguo), so
+ *    the real SDK login path and server selection keep working.
  *
  * 2. Build an in-game floating UI with pure cc.Node/cc.Graphics:
  *      - a small "功能" dot near the top-left, visible once the game scene is up;
@@ -76,14 +82,32 @@ public class MainHook implements IXposedHookLoadPackage {
             "(function(){"
           + "if (window.__ttzz) return; window.__ttzz = 1;"
           + "var tries = 0;"
-          + "function patchChannel(){"
+          + "function unlockCheat(){"
           + "  try {"
-          + "    if (typeof Home !== 'undefined' && Home && Home.GlobalConfig && Home.GlobalConfig.inst) {"
-          + "      Object.defineProperty(Home.GlobalConfig.inst, 'channel', {configurable:true, get:function(){return 'debug';}});"
-          + "      return true;"
-          + "    }"
-          + "  } catch(e){}"
-          + "  return false;"
+          + "    if (typeof Home === 'undefined' || !Home || !Home.GlobalConfig || !Home.GlobalConfig.inst) return false;"
+          + "    var DC = window.DebugCheat;"
+          + "    if (!DC || typeof DC.handleKeyDown !== 'function') return false;"
+          + "    if (DC.__ttzzUnlocked) return true;"
+          + "    var orig = DC.handleKeyDown;"
+          + "    DC.__ttzzUnlocked = true;"
+          + "    DC.handleKeyDown = function(k){"
+          + "      var inst = Home.GlobalConfig.inst;"
+          + "      var desc = null;"
+          + "      try { desc = Object.getOwnPropertyDescriptor(inst, 'channel'); } catch(e){}"
+          + "      var ret;"
+          + "      try {"
+          + "        Object.defineProperty(inst, 'channel', {configurable:true, get:function(){return 'debug';}, set:function(){}});"
+          + "        ret = orig.call(DC, k);"
+          + "      } finally {"
+          + "        try {"
+          + "          if (desc) Object.defineProperty(inst, 'channel', desc);"
+          + "          else { try { delete inst.channel; } catch(e){} }"
+          + "        } catch(e){}"
+          + "      }"
+          + "      return ret;"
+          + "    };"
+          + "    return true;"
+          + "  } catch(e){ return false; }"
           + "}"
           + "function fire(k){ try { var DC = window.DebugCheat; if (DC && DC.handleKeyDown) DC.handleKeyDown(k); } catch(e){} }"
           + "function tip(s){ try { if (typeof Core !== 'undefined' && Core.TipsUtils) Core.TipsUtils.showTipsFromCenter(s); } catch(e){} }"
@@ -168,7 +192,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "}"
           + "function tick(){"
           + "  tries++;"
-          + "  var ok = patchChannel();"
+          + "  var ok = unlockCheat();"
           + "  if (ok) window.__ttzzCh = 1;"
           + "  var sceneOk = false;"
           + "  try { sceneOk = (typeof cc !== 'undefined' && cc.director && cc.director.getScene && cc.director.getScene() && cc.view && cc.view.getVisibleSize); } catch(e){}"
@@ -353,7 +377,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             PAYLOAD_SENT.set(true);
             XposedBridge.log("[TTZZBX32] payload injected via " + via
-                    + " (dot UI + channel=debug)");
+                    + " (dot UI + DebugCheat.handleKeyDown wrapped; real channel preserved)");
         } catch (Throwable t) {
             XposedBridge.log("[TTZZBX32] payload inject via " + via + " failed: " + t);
         }
