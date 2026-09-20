@@ -31,7 +31,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *      - menu buttons call window.DebugCheat.handleKeyDown(<official keycode>) or
  *        toggle BattleTestManager.inst.isWallSuper directly;
  *      - the "隐藏" item collapses the menu back to the dot.
- *    The UI root is a persistent node so it survives scene switches.
+ *    The UI root is a persistent node; additionally buildUI() re-runs on every scene
+ *    launch (via a loadScene hook + EVENT_AFTER_SCENE_LAUNCH) and is guarded by a node
+ *    validity check, so the dot always comes back even if the persist-root was dropped.
  *
  * IMPORTANT classloader note: org.cocos2dx.lib.* classes live in the TARGET app's
  * PathClassLoader, NOT the module's. Class.forName() from module code will NOT find
@@ -44,8 +46,10 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *   b) piggyback on the game's own bridge evalString calls (best effort: evalString
  *      is a native method so the hook itself may be skipped by the framework);
  *   c) Cocos2dxActivity.onCreate -> runOnGLThread delayed retries.
- * The payload is idempotent (window.__ttzz / __ttzzUi flags + JS-side retry loop),
- * so duplicate or repeated triggers are harmless.
+ * The payload is idempotent (window.__ttzz flag + JS-side retry loop), and the UI
+ * node is rebuilt on every scene launch (window.__ttzzRoot validity check + loadScene
+ * hook + EVENT_AFTER_SCENE_LAUNCH) so it can never get stuck "gone" after a scene
+ * switch. Duplicate or repeated triggers are harmless.
  */
 public class MainHook implements IXposedHookLoadPackage {
 
@@ -109,11 +113,10 @@ public class MainHook implements IXposedHookLoadPackage {
           + "  parent.addChild(n);"
           + "}"
           + "function buildUI(){"
-          + "  if (window.__ttzzUi) return;"
+          + "  if (window.__ttzzRoot && window.__ttzzRoot.isValid) return;"
           + "  var scene = null;"
           + "  try { scene = cc.director.getScene(); } catch(e){ return; }"
           + "  if (!scene) return;"
-          + "  window.__ttzzUi = 1;"
           + "  var size = cc.view.getVisibleSize();"
           + "  var root = new cc.Node('ttzz_root');"
           + "  var menu = new cc.Node('ttzz_menu');"
@@ -161,16 +164,30 @@ public class MainHook implements IXposedHookLoadPackage {
           + "  root.addChild(dot);"
           + "  scene.addChild(root);"
           + "  try { cc.game.addPersistRootNode(root); } catch(e){}"
+          + "  window.__ttzzRoot = root; window.__ttzzMenu = menu; window.__ttzzDot = dot;"
           + "}"
           + "function tick(){"
           + "  tries++;"
           + "  var ok = patchChannel();"
+          + "  if (ok) window.__ttzzCh = 1;"
           + "  var sceneOk = false;"
           + "  try { sceneOk = (typeof cc !== 'undefined' && cc.director && cc.director.getScene && cc.director.getScene() && cc.view && cc.view.getVisibleSize); } catch(e){}"
           + "  if (sceneOk) { try { buildUI(); } catch(e){} }"
-          + "  if (ok && window.__ttzzUi) return;"
-          + "  if (tries < 600) setTimeout(tick, 250);"
+          + "  var rootOk = window.__ttzzRoot && window.__ttzzRoot.isValid;"
+          + "  if (window.__ttzzCh && rootOk) return;"
+          + "  if (tries < 1200) setTimeout(tick, 250);"
           + "}"
+          + "function watchScenes(){"
+          + "  try {"
+          + "    if (window.__ttzzWatch) return; window.__ttzzWatch = 1;"
+          + "    var d = cc.director; if (!d) return;"
+          + "    var _ls = d.loadScene;"
+          + "    if (typeof _ls === 'function') { d.loadScene = function(){ var a = arguments; var r = _ls.apply(d, a); setTimeout(function(){ try { buildUI(); } catch(e){} }, 400); return r; }; }"
+          + "    var ev = (cc.Director && cc.Director.EVENT_AFTER_SCENE_LAUNCH) || (d.EVENT_AFTER_SCENE_LAUNCH);"
+          + "    if (d.on && ev) { d.on(ev, function(){ setTimeout(function(){ try { buildUI(); } catch(e){} }, 400); }); }"
+          + "  } catch(e){}"
+          + "}"
+          + "watchScenes();"
           + "tick();"
           + "})();";
 
