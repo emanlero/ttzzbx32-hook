@@ -87,6 +87,29 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *        关闭时 -30 还原并强制 refreshData 立即恢复原值。循环每 500ms 兜底新上阵的英雄。
  *      - AttributeKeys.HP = 1, AttributeKeys.Atk = 4 (GameLogic 82007-82033)。
  *
+ * 7. Monthly-card toggle (月卡 开/关, 纯客户端本地状态 + 特权):
+ *      - 关键结论: 本包的「月卡」在代码上就等于 outStatusAdvip(30天免广告卡)。三条证据:
+ *          (a) 埋点超级属性 Core.TagTrackBegin.tagBeginData() (GameLogic 19724):
+ *              monthly_card: Shop.ShopVipMgr.inst.outStatusAdvip ? "1" : "0"
+ *              —— 官方自己就拿 outStatusAdvip 当"是否持有月卡"。
+ *          (b) 本地表 sold_vip 只有一条 _id_="1" == VipType.ADRVIP, duration=30(天),
+ *              price="resource:23:300"(300 开新币), resourceId="resource:2:300"(购买立赠);
+ *              Shop.ShopVipItem(144240) 的购买按钮就是 buyVip("1", advipPriece) (144080-144081)。
+ *          (c) 真 VIP(VipType.VIP="2")链路是死代码: statusId2vipID(126631) 中没有任何 key 映射到 "2",
+ *              故 _outStatusVip 唯一写入点(126692)不可达; 其奖励预览表 Data.info_reward_vip 不存在于
+ *              本地 59 张表(144228 会抛错); outStatusVip 全代码仅 1 处读取(126962, 只拼剩余天数文本)。
+ *      - 实现 = 点亮月卡状态 + 开启月卡的本地特权:
+ *          * monthCardVip(on): 把 {StatusId:'2', EndTime:now+30d, RemainTime:30d} 写进 _outStatusVip,
+ *            并翻转 _isUpdateVipStatus 触发绑定 UI(GetVipRewardViewCom._refreshEvnent 126961)刷新;
+ *          * monthCardToggle(on) 同时调用已验证的 advFreeSweep(on) —— 月卡特权(免广告 / 免费扫荡 /
+ *            1.8x 倍速 / 体力上限+90 的 advipPhy 显示)全都读 outStatusAdvip, 复用同一底层字段,
+ *            避免两个按钮各自保存/还原 _outStatusAdvip 而互相覆盖;
+ *          * EndTime 用秒(与 ShopVipMgr.isForbidChat 的 `Number(EndTime) - Date.now()/1e3` 一致),
+ *            日常结算用的 RemainTime 也是秒(126964 secToString(RemainTime,"d"))。
+ *      - 不做: 月卡的每日奖励 / 购买立赠 由服务器发放(邮件 C2S_GET_MAIL_REWARD、活动
+ *        C2S_GET_ACTIVITY_REWARD、购买 C2S_BUY_VIP{VipId} 不带价格且服务端校验余额), 本地伪造属伪造请求。
+ *      - 纯内存状态, 重新登录时服务器推送的真实 Statuses 会覆盖(同样会覆盖免广告卡状态)。
+ *
  * IMPORTANT classloader note: org.cocos2dx.lib.* classes live in the TARGET app's
  * PathClassLoader, NOT the module's. Class.forName() from module code will NOT find
  * them. We therefore resolve the bridge class through lpparam.classLoader and cache
@@ -319,6 +342,52 @@ public class MainHook implements IXposedHookLoadPackage {
           + "  try { heroStatTouch(true); } catch(e){}"
           + "  setTimeout(heroStatLoop, 500);"
           + "}"
+          // ---- 月卡(30天免广告卡) ------------------------------------------------
+          // 重要事实: 在本包(build)里「月卡」在代码上就是 outStatusAdvip, 三条硬证据:
+          //   1) 埋点超级属性 tagBeginData(19724): monthly_card = ShopVipMgr.inst.outStatusAdvip ? '1' : '0'
+          //      —— 官方自己就是用 outStatusAdvip 标记"是否持有月卡"。
+          //   2) 本地表 sold_vip 只有一条 _id_='1' = VipType.ADRVIP, duration=30(天)、
+          //      price='resource:23:300'(300 开新币)、resourceId='resource:2:300'(立赠)。
+          //      商店面板的购买按钮(144080-144081)就是 buyVip('1', advipPriece)。
+          //   3) 真 VIP(VipType.VIP='2')那条链路是死代码: statusId2vipID(126631) 里没有任何 key
+          //      映射到 '2', 所以 _outStatusVip 永远写不进去(唯一写入点 126692 不可达);
+          //      其奖励预览表 Data.info_reward_vip 也不存在于本地 59 张表里(144228 会抛错);
+          //      outStatusVip 全代码只有 1 处读取(126962, 只用于拼一段剩余天数文本)。
+          // 所以"月卡功能"= 点亮月卡(VIP)状态 + 开启月卡的本地特权(免广告/1.8x倍速/无限免费扫荡/
+          // 体力上限+90 的 advipPhy 显示)。特权那半边复用已验证的 advFreeSweep()(同一底层字段),
+          // 这样两个按钮不会互相覆盖; 另外把月卡状态(剩余30天)写进 _outStatusVip 让 UI 显示已开通。
+          // 月卡的每日奖励/立赠道具由服务器发放(邮件 C2S_GET_MAIL_REWARD / 活动 C2S_GET_ACTIVITY_REWARD),
+          // 本地无法伪造 —— 不涉及。
+          + "var MC_ON = false;"
+          + "var MCV_ON = false;"
+          + "var MCV_ORIG = null;"
+          + "var MC_DAYS = 30;"
+          + "function monthCardMgr(){"
+          + "  var M = null;"
+          + "  try { if (typeof Shop !== 'undefined' && Shop && Shop.ShopVipMgr) M = Shop.ShopVipMgr.inst; } catch(e){}"
+          + "  if (!M) { try { M = eval('Shop').ShopVipMgr.inst; } catch(e){} }"
+          + "  return M || null;"
+          + "}"
+          + "function monthCardVip(on){"
+          + "  try {"
+          + "    var M = monthCardMgr();"
+          + "    if (!M) return false;"
+          + "    if (on) {"
+          + "      if (!MCV_ON) { MCV_ORIG = M._outStatusVip; MCV_ON = true; }"
+          + "      var secs = MC_DAYS * 86400;"
+          + "      M._outStatusVip = { StatusId: '2', EndTime: Math.floor(Date.now() / 1000) + secs, RemainTime: secs };"
+          + "    } else {"
+          + "      if (MCV_ON) { M._outStatusVip = MCV_ORIG; MCV_ON = false; }"
+          + "    }"
+          + "    try { M._isUpdateVipStatus = !M._isUpdateVipStatus; } catch(e){}"
+          + "    return true;"
+          + "  } catch(e2){ return false; }"
+          + "}"
+          + "function monthCardToggle(on){"
+          + "  var a = advFreeSweep(on);"
+          + "  var b = monthCardVip(on);"
+          + "  return a || b;"
+          + "}"
           + "function installTimeMask(){"
           + "  try {"
           + "    if (typeof Core === 'undefined' || !Core) return false;"
@@ -401,6 +470,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "    ['英雄强化 开/关', function(){ HERO_BOOST = !HERO_BOOST; if (HERO_BOOST){ try { boostAllHeroes(); } catch(e){} heroBoostLoop(); tip('英雄强化:开'); } else tip('英雄强化:关'); }],"
           + "    ['英雄攻血+30%', function(){ HERO_STAT = !HERO_STAT; heroStatTouch(HERO_STAT); if (HERO_STAT) { heroStatLoop(); tip('英雄攻血+30%:开'); } else tip('英雄攻血+30%:关'); }],"
           + "    ['免广告/免费扫荡', function(){ var st = !ADV_ON; var r = advFreeSweep(st); tip(r ? ('免广告/免费扫荡:' + (st ? '开' : '关')) : '免广告不可用'); }],"
+          + "    ['月卡 开/关', function(){ MC_ON = !MC_ON; var r = monthCardToggle(MC_ON); tip(r ? ('月卡:' + (MC_ON ? '开(30天)' : '关')) : '月卡不可用'); }],"
           + "    ['隐藏', function(){ menu.active = false; }]"
           + "  ];"
           + "  var BW = Math.min(560, size.width * 0.8);"
