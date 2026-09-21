@@ -74,6 +74,19 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *      - This is an in-memory client privilege only (server still grants the sweep via RPC,
  *        and login re-pushes the real Statuses, which overwrites it on the next relogin).
  *
+ * 6. Hero stat toggle (己方上阵英雄 攻击+30% / 血量+30%, 纯客户端本地战斗模拟):
+ *      - 英雄(法师)属性由 MageHPAttribute / MageAtkAttribute 计算, 与怪物的 Monster* 属性是不同类:
+ *            MageHPAttribute.refreshData()  : hpMax = (attrBase + hpUp*Lv + buff) * attrPercentBase / 100 ;
+ *                                             参数为真时 hp = hpMax * (hp/hpMax)   (GameLogic 80664-80686)
+ *            MageAtkAttribute.refreshData() : atk = (attrBase + ...) * attrPercentBase / 100 * lastPercent    (GameLogic 80895-80918)
+ *        attrPercentBase 就是这两条公式里的百分比通道(初值 100, 装备/光环/天赋的百分比加成都 addInt 到这里),
+ *        而且不会被 refreshData 重算覆盖 —— 所以直接 +30 就是最干净、最稳的 +30% 入口:
+ *            HP  属性实例 attrPercentBase += 30 -> hpMax 与 hp 同步 x1.3 (hp/hpMax 比例不变 = 有效血量 x1.3)
+ *            Atk 属性实例 attrPercentBase += 30 -> atk x1.3, realNum/fixedNum 一并按新值算出, 面板数字同步
+ *      - 只作用于 battle.mageEntities(己方上阵英雄)这两个属性实例, 不碰敌人 / PK 对手;
+ *        关闭时 -30 还原并强制 refreshData 立即恢复原值。循环每 500ms 兜底新上阵的英雄。
+ *      - AttributeKeys.HP = 1, AttributeKeys.Atk = 4 (GameLogic 82007-82033)。
+ *
  * IMPORTANT classloader note: org.cocos2dx.lib.* classes live in the TARGET app's
  * PathClassLoader, NOT the module's. Class.forName() from module code will NOT find
  * them. We therefore resolve the bridge class through lpparam.classLoader and cache
@@ -224,6 +237,88 @@ public class MainHook implements IXposedHookLoadPackage {
           + "function heroBoostLoop(){"
           + "  if (HERO_BOOST) { try { boostAllHeroes(true); } catch(e){} setTimeout(heroBoostLoop, 300); }"
           + "}"
+          // ---- 己方上阵英雄: 攻击 +30% / 血量 +30% --------------------------------
+          // 英雄(法师)属性由 MageHPAttribute / MageAtkAttribute 计算, 与怪物的 Monster* 属性是不同类:
+          //   MageHPAttribute.refreshData  (GameLogic 80664-80686):
+          //       h = (attrBase + hpUp*Lv + buff) * attrPercentBase / 100 ; hpMax = h ; 参数为真时 hp = h*(hp/hpMax)
+          //   MageAtkAttribute.refreshData (GameLogic 80895-80918):
+          //       s = (attrBase + ...) * attrPercentBase / 100 * lastPercent ; atk = s
+          // attrPercentBase 就是这两条公式里的百分比通道(初值 100, 装备/光环/天赋的百分比加成都 addInt 到这里),
+          // 而且它不会被 refreshData 重算覆盖 —— 所以直接 +30 就是最干净、最稳的 +30% 入口:
+          //   HP  属性实例 attrPercentBase += 30 -> hpMax 与 hp 同步 x1.3 (hp/hpMax 比例不变 = 有效血量 x1.3)
+          //   Atk 属性实例 attrPercentBase += 30 -> atk x1.3, realNum/fixedNum 也会一起算出来, 面板数字同步
+          // 只对 battle.mageEntities(己方上阵英雄)这两个属性实例做, 不碰敌人 / PK 对手;
+          // 关闭时 -30 还原并强制 refreshData, 立刻恢复原值。
+          + "var HERO_STAT = false;"
+          + "var HERO_STAT_PCT = 30;"
+          + "function btlB(){ try { return window.Battle || (typeof Battle !== 'undefined' ? Battle : null); } catch(e){ try { return window.Battle || null; } catch(e2){ return null; } } }"
+          + "function heroStatSet(attr, on, pct){"
+          + "  try {"
+          + "    if (!attr || !attr.attrPercentBase) return false;"
+          + "    if (on) {"
+          + "      if (attr.__ttzzStatOn) return false;"
+          + "      if (!attr.attrPercentBase.addInt) return false;"
+          + "      attr.attrPercentBase = attr.attrPercentBase.addInt(pct);"
+          + "      attr.__ttzzStatOn = true;"
+          + "      attr.__ttzzStatPct = pct;"
+          + "      return true;"
+          + "    }"
+          + "    if (!attr.__ttzzStatOn) return false;"
+          + "    var p = attr.__ttzzStatPct || pct;"
+          + "    if (attr.attrPercentBase.subInt) attr.attrPercentBase = attr.attrPercentBase.subInt(p);"
+          + "    attr.__ttzzStatOn = false;"
+          + "    return true;"
+          + "  } catch(e){ return false; }"
+          + "}"
+          + "function heroStatApply(oc, on, pct){"
+          + "  try {"
+          + "    if (!oc || !oc.objAttribute) return false;"
+          + "    var B = btlB(); if (!B) return false;"
+          + "    var hpA = null, atkA = null;"
+          + "    try { hpA = oc.objAttribute.getValue(B.AttributeKeys.HP); } catch(e1){}"
+          + "    try { atkA = oc.objAttribute.getValue(B.AttributeKeys.Atk); } catch(e2){}"
+          + "    if (!hpA && !atkA) return false;"
+          + "    if (hpA) heroStatSet(hpA, on, pct);"
+          + "    if (atkA) heroStatSet(atkA, on, pct);"
+          + "    try { if (hpA && hpA.refreshData) hpA.refreshData(true); } catch(e3){}"
+          + "    try { if (atkA && atkA.refreshData) atkA.refreshData(); } catch(e4){}"
+          + "    return true;"
+          + "  } catch(e){ return false; }"
+          + "}"
+          + "function btlBattle(){"
+          + "  try {"
+          + "    var B = btlB(); if (!B) return null;"
+          + "    try { if (B.BattleMgr && B.BattleMgr.battle) return B.BattleMgr.battle; } catch(e){}"
+          + "    try { return B.EntityMgr.inst.getBattle(BattleIndex.myBattle); } catch(e){}"
+          + "    return null;"
+          + "  } catch(e){ return null; }"
+          + "}"
+          + "function heroStatTouch(on, force){"
+          // force=true: 忽略标记, 对当前场上所有英雄重新应用/还原(开关切换时用)
+          // force=false: 只处理这一帧新出现的英雄
+          + "  try {"
+          + "    var B = btlB(); if (!B) return 0;"
+          + "    var battle = btlBattle();"
+          + "    if (!battle || !battle.mageEntities) return 0;"
+          + "    var cnt = 0;"
+          + "    for (var i = 0; i < battle.mageEntities.length; i++) {"
+          + "      var e = battle.mageEntities[i];"
+          + "      if (!e) continue;"
+          + "      if (force) e.__ttzzStatMark = false;"
+          + "      if (e.__ttzzStatMark) continue;"
+          + "      var oc = null;"
+          + "      try { oc = e.getComponentKeys(B.BaseObjectComponent); } catch(x){ try { oc = e.getComponent(B.BaseObjectComponent); } catch(y){ oc = null; } }"
+          + "      if (!oc || !oc.objAttribute) continue;"
+          + "      if (heroStatApply(oc, on, HERO_STAT_PCT)) { e.__ttzzStatMark = true; cnt++; }"
+          + "    }"
+          + "    return cnt;"
+          + "  } catch(e){ return 0; }"
+          + "}"
+          + "function heroStatLoop(){"
+          + "  if (!HERO_STAT) return;"
+          + "  try { heroStatTouch(true, false); } catch(e){}"
+          + "  setTimeout(heroStatLoop, 500);"
+          + "}"
           + "function installTimeMask(){"
           + "  try {"
           + "    if (typeof Core === 'undefined' || !Core) return false;"
@@ -304,6 +399,7 @@ public class MainHook implements IXposedHookLoadPackage {
           + "    ['掉落宝箱', function(){ fire(cc.macro.KEY.x); }],"
           + "    ['测试工具窗', function(){ fire(cc.macro.KEY.t); }],"
           + "    ['英雄强化 开/关', function(){ HERO_BOOST = !HERO_BOOST; if (HERO_BOOST){ try { boostAllHeroes(); } catch(e){} heroBoostLoop(); tip('英雄强化:开'); } else tip('英雄强化:关'); }],"
+          + "    ['英雄攻血+30%', function(){ HERO_STAT = !HERO_STAT; heroStatTouch(HERO_STAT, true); if (HERO_STAT) { heroStatLoop(); tip('英雄攻血+30%:开'); } else tip('英雄攻血+30%:关'); }],"
           + "    ['免广告/免费扫荡', function(){ var st = !ADV_ON; var r = advFreeSweep(st); tip(r ? ('免广告/免费扫荡:' + (st ? '开' : '关')) : '免广告不可用'); }],"
           + "    ['隐藏', function(){ menu.active = false; }]"
           + "  ];"
